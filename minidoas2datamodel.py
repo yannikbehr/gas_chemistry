@@ -312,7 +312,6 @@ def FITS_download(date, station, outputpath='/tmp'):
     date_end = nztz.localize(datetime.datetime(date.year, date.month, date.day, 23, 59, 59))
     date_start_utc = date_start.astimezone(utc)
     date_end_utc = date_end.astimezone(utc)
-
     base_url="https://fits.geonet.org.nz/observation"
     url = "{}?siteID={}&typeID=SO2-flux-a&methodID={}"
     filepaths = []
@@ -324,9 +323,15 @@ def FITS_download(date, station, outputpath='/tmp'):
                                                             date.day,
                                                             _type)
         filepath = os.path.join(outputpath, filename)
-        df = pd.read_csv(url.format(base_url, station, method), 
-                         index_col=0, parse_dates=True,
+        fits_cache = os.path.join('/tmp', "{}_{}.csv".format(station, method))
+        if os.path.isfile(fits_cache):
+            df = pd.read_csv(fits_cache, index_col=0, parse_dates=True,
                          skiprows=1, names=['obs', 'error'])
+        else:
+            df = pd.read_csv(url.format(base_url, station, method), 
+                             index_col=0, parse_dates=True,
+                             skiprows=1, names=['obs', 'error'])
+            df.to_csv(fits_cache)
         df_new = df.loc[(df.index>=date_start_utc) & (df.index <= date_end_utc)]
         if df_new.size < 1:
             filepath = None
