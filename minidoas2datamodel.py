@@ -20,13 +20,18 @@ from spectroscopy.util import vec2bearing, bearing2vec
 class MDOASException(Exception): pass
 
 
-def read_single_station(d, station_info):
+def read_single_station(d, station_info, date):
     """
     Read all the data for a single MiniDoas station for one day.
     """
+    nztz = timezone('Pacific/Auckland')
+    date_nz = nztz.localize(datetime.datetime(date.year, date.month, date.day, 6,0,0))
+    timeshift = int(date_nz.utcoffset().seconds/3600.)
+    datestr = '{:d}-{:02d}-{:02d}'.format(date.year, date.month, date.day)
+
     # Read the raw data
     e0 = d.read(station_info['files']['raw'], 
-                ftype='minidoas-raw', timeshift=13)
+                ftype='minidoas-raw', timeshift=timeshift)
     ib = InstrumentBuffer(name=station_info['stationID'],
                           location=station_info['stationLoc'],
                           no_bits=16,
@@ -51,7 +56,8 @@ def read_single_station(d, station_info):
 
     # Read the concentration
     e1 = d.read(station_info['files']['spectra'],
-                date='2016-11-01', ftype='minidoas-spectra', timeshift=13)
+                date=datestr, ftype='minidoas-spectra',
+                timeshift=timeshift)
     cb = e1['ConcentrationBuffer']
     idxs = np.zeros(cb.value.shape)
     for i in range(cb.value.shape[0]):
@@ -65,7 +71,8 @@ def read_single_station(d, station_info):
    
     # Read in the flux estimates for assumed height
     e3 = d.read(station_info['files']['flux_ah'],
-                date='2016-11-01', ftype='minidoas-scan', timeshift=13)
+                date=datestr, ftype='minidoas-scan',
+                timeshift=timeshift)
     fb = e3['FluxBuffer']
     dt = fb.datetime[:].astype('datetime64[s]')
     indices = []
@@ -99,8 +106,9 @@ def read_single_station(d, station_info):
 
     # Read in the flux estimates for calculated height
     e4 = d.read(station_info['files']['flux_ch'],
-                date='2016-11-01', ftype='minidoas-scan',
-                station=station_info['wp_station_id'], timeshift=13)
+                date=datestr, ftype='minidoas-scan',
+                station=station_info['wp_station_id'],
+                timeshift=timeshift)
     fb1 = e4['FluxBuffer']
     dt = fb1.datetime[:].astype('datetime64[s]')
     indices = []
@@ -446,7 +454,7 @@ for date in dates:
             station_info[station]['files']['fits_flux_ch'] = fits_flux_ch
 
 
-            read_single_station(d, station_info[station])
+            read_single_station(d, station_info[station], date)
 
         # Wind data
         windd_dir = os.path.join(raw_data_path, 'wind', 'direction')
