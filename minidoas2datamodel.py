@@ -1,4 +1,5 @@
 import datetime
+import logging
 import os
 from zipfile import ZipFile
 
@@ -6,6 +7,7 @@ import numpy as np
 import pandas as pd
 import pyproj
 from pytz import timezone, utc
+from progress.bar import Bar
 
 from spectroscopy.dataset import Dataset
 from spectroscopy.plugins.minidoas import MiniDoasException
@@ -15,6 +17,12 @@ from spectroscopy.datamodel import (PreferredFluxBuffer,
                                     TargetBuffer,
                                     MethodBuffer)
 from spectroscopy.util import vec2bearing, bearing2vec
+
+
+logging.basicConfig(filename='minidoas2datamodel.log', filemode='w',
+                    level=logging.DEBUG,
+                    format='%(levelname)s %(asctime)s: %(message)s',
+                    datefmt='%Y/%m/%d %H:%M:%S')
 
 
 class MDOASException(Exception): pass
@@ -30,6 +38,14 @@ def read_single_station(d, station_info, date):
     datestr = '{:d}-{:02d}-{:02d}'.format(date.year, date.month, date.day)
 
     # Read the raw data
+    if station_info['files']['raw'] is None:
+        # There is no point continuing if we don't have any raw data
+        msg = "No raw data for:\n"
+        msg += "-->Station: {}\n".format(station_info['stationID'])
+        msg += "-->Date: {}\n".format(str(date))
+        logging.info(msg)
+        return
+
     e0 = d.read(station_info['files']['raw'], 
                 ftype='minidoas-raw', timeshift=timeshift)
     ib = InstrumentBuffer(name=station_info['stationID'],
@@ -55,6 +71,13 @@ def read_single_station(d, station_info, date):
     rr = d.new(rb)
 
     # Read the concentration
+    if station_info['files']['spectra'] is None:
+        msg = "No concentration (i.e. spectra) data for:\n"
+        msg += "-->Station: {}\n".format(station_info['stationID'])
+        msg += "-->Date: {}\n".format(str(date))
+        logging.info(msg)
+        return
+
     e1 = d.read(station_info['files']['spectra'],
                 date=datestr, ftype='minidoas-spectra',
                 timeshift=timeshift)
@@ -70,109 +93,161 @@ def read_single_station(d, station_info, date):
 
    
     # Read in the flux estimates for assumed height
-    e3 = d.read(station_info['files']['flux_ah'],
-                date=datestr, ftype='minidoas-scan',
-                timeshift=timeshift)
-    fb = e3['FluxBuffer']
-    dt = fb.datetime[:].astype('datetime64[s]')
-    indices = []
-    for _dt in dt:
-        idx = np.argmin(np.abs(cc.datetime[:].astype('datetime64[us]') - _dt))
-        idx0 = idx
-        while True:
-            angle = rr.inc_angle[cc.rawdata_indices[idx]+1]
-            if angle > 180.:
-                break
-            idx += 1
-        idx1 = idx
-        indices.append([idx0, idx1+1])
-    fb.concentration = cc
-    fb.concentration_indices = indices
-    
-    gfb1 = e3['GasFlowBuffer']
+    if station_info['files']['flux_ah'] is None:
+        msg = "No assumed height flux data for:\n"
+        msg += "-->Station: {}\n".format(station_info['stationID'])
+        msg += "-->Date: {}\n".format(str(date))
+        logging.info(msg)
+    else:
+        e3 = d.read(station_info['files']['flux_ah'],
+                    date=datestr, ftype='minidoas-scan',
+                    timeshift=timeshift)
+        fb = e3['FluxBuffer']
+        dt = fb.datetime[:].astype('datetime64[s]')
+        indices = []
+        for _dt in dt:
+            idx = np.argmin(np.abs(cc.datetime[:].astype('datetime64[us]') - _dt))
+            idx0 = idx
+            while True:
+                angle = rr.inc_angle[cc.rawdata_indices[idx]+1]
+                if angle > 180.:
+                    break
+                idx += 1
+            idx1 = idx
+            indices.append([idx0, idx1+1])
+        fb.concentration = cc
+        fb.concentration_indices = indices
+        
+        gfb1 = e3['GasFlowBuffer']
 
-    m2 = None
-    for _m in d.elements['Method']:
-        if _m.name[:] == 'WS2PV':
-            m2 = _m
-    if m2 is None:
-        mb2 = e3['MethodBuffer']
-        m2 = d.new(mb2)
+        m2 = None
+        for _m in d.elements['Method']:
+            if _m.name[:] == 'WS2PV':
+                m2 = _m
+        if m2 is None:
+            mb2 = e3['MethodBuffer']
+            m2 = d.new(mb2)
 
-    gfb1.methods = [m2]
-    gf1 = d.new(gfb1) 
-    fb.gasflow = gf1 
-    f = d.new(fb)
+        gfb1.methods = [m2]
+        gf1 = d.new(gfb1) 
+        fb.gasflow = gf1 
+        f = d.new(fb)
+        # Now read in preferred flux values for assumed height downloaded from FITS
+        if station_info['files']['fits_flux_ah'] is None:
+            msg = "No preferred flux for assumed height in FITS:\n"
+            msg += "-->Station: {}\n".format(station_info['stationID'])
+            msg += "-->Date: {}\n".format(str(date))
+            logging.error(msg)
+        else:
+            data_ah = np.loadtxt(station_info['files']['fits_flux_ah'],
+                              dtype=np.dtype([('date','S19'),('val',np.float),('err',np.float)]),
+                              skiprows=1, delimiter=',', ndmin=1)
+            dates = data_ah['date'].astype('datetime64[s]')
+            indices = []
+            values = []
+            val_err = []
+            ndates = []
+            for i, dt in enumerate(dates):
+                min_tdiff = np.min(np.abs(f.datetime[:].astype('datetime64[s]') - dt))
+                if min_tdiff.astype('int') > 1:
+                    msg = "No assumed height flux estimate can be found for FITS value:\n"
+                    msg += "-->Station: {}\n".format(station_info['stationID'])
+                    msg += "-->Date: {}\n".format(str(dt))
+                    msg += "-->FITS value: {}\n".format(data_ah['val'][i])
+                    logging.error(msg)
+                else:   
+                    idx = np.argmin(np.abs(f.datetime[:].astype('datetime64[s]') - dt))
+                    indices.append(idx)
+                    values.append(data_ah['val'][i])
+                    val_err.append(data_ah['err'][i])
+                    ndates.append(str(dt))
+            pfb = PreferredFluxBuffer(fluxes=[f],
+                                      flux_indices=indices,
+                                      value=values,
+                                      value_error=val_err,
+                                      datetime=ndates)
+            d.new(pfb)
+
 
     # Read in the flux estimates for calculated height
-    e4 = d.read(station_info['files']['flux_ch'],
-                date=datestr, ftype='minidoas-scan',
-                station=station_info['wp_station_id'],
-                timeshift=timeshift)
-    fb1 = e4['FluxBuffer']
-    dt = fb1.datetime[:].astype('datetime64[s]')
-    indices = []
-    for _dt in dt:
-        idx = np.argmin(np.abs(cc.datetime[:].astype('datetime64[us]') - _dt))
-        idx0 = idx
-        while True:
-            angle = rr.inc_angle[cc.rawdata_indices[idx]+1]
-            if angle > 180.:
-                break
-            idx += 1
-        idx1 = idx
-        indices.append([idx0, idx1])
-    fb1.concentration = cc
-    fb1.concentration_indices = indices
-    
-    m3 = None
-    for _m in d.elements['Method']:
-        if _m.name[:] == 'WS2PVT':
-            m3 = _m
-    if m3 is None:
-        mb3 = e4['MethodBuffer']
-        new_description = mb3.description[0] + '; plume geometry inferred from triangulation'
-        mb3.description = new_description
-        mb3.name = 'WS2PVT'
-        m3 = d.new(mb3)
+    if station_info['files']['flux_ch'] is None:
+        msg = "No calculated height flux data for:\n"
+        msg += "-->Station: {}\n".format(station_info['stationID'])
+        msg += "-->Date: {}\n".format(str(date))
+        logging.info(msg)
+    else:
+        e4 = d.read(station_info['files']['flux_ch'],
+                    date=datestr, ftype='minidoas-scan',
+                    station=station_info['wp_station_id'],
+                    timeshift=timeshift)
+        fb1 = e4['FluxBuffer']
+        dt = fb1.datetime[:].astype('datetime64[s]')
+        indices = []
+        for _dt in dt:
+            idx = np.argmin(np.abs(cc.datetime[:].astype('datetime64[us]') - _dt))
+            idx0 = idx
+            while True:
+                angle = rr.inc_angle[cc.rawdata_indices[idx]+1]
+                if angle > 180.:
+                    break
+                idx += 1
+            idx1 = idx
+            indices.append([idx0, idx1])
+        fb1.concentration = cc
+        fb1.concentration_indices = indices
         
-    gfb2 = e4['GasFlowBuffer']
-    gfb2.methods = [m3]
-    gf2 = d.new(gfb2)
-    fb1.gasflow = gf2
-    f1 = d.new(fb1)
+        m3 = None
+        for _m in d.elements['Method']:
+            if _m.name[:] == 'WS2PVT':
+                m3 = _m
+        if m3 is None:
+            mb3 = e4['MethodBuffer']
+            new_description = mb3.description[0] + '; plume geometry inferred from triangulation'
+            mb3.description = new_description
+            mb3.name = 'WS2PVT'
+            m3 = d.new(mb3)
+            
+        gfb2 = e4['GasFlowBuffer']
+        gfb2.methods = [m3]
+        gf2 = d.new(gfb2)
+        fb1.gasflow = gf2
+        f1 = d.new(fb1)
 
-    # Now read in preferred flux values for assumed height downloaded from FITS
-    data_ah = np.loadtxt(station_info['files']['fits_flux_ah'],
-                      dtype=np.dtype([('date','S19'),('val',np.float),('err',np.float)]),
-                      skiprows=1, delimiter=',')
-    dates = data_ah['date'].astype('datetime64[s]')
-    indices = []
-    for i, dt in enumerate(dates):
-        idx = np.argmin(np.abs(f.datetime[:].astype('datetime64[s]') - dt))
-        indices.append(idx)
-    pfb = PreferredFluxBuffer(fluxes=[f],
-                              flux_indices=[indices],
-                              value=data_ah['val'],
-                              value_error=data_ah['err'],
-                              datetime=dates.astype(str))
-    d.new(pfb)
-
-    # Now read in preferred flux values for calculated height downloaded from FITS
-    data_ch = np.loadtxt(station_info['files']['fits_flux_ch'],
-                         dtype=np.dtype([('date','S19'),('val',np.float),('err',np.float)]),
-                         skiprows=1, delimiter=',')
-    dates = data_ch['date'].astype('datetime64[s]')
-    indices = []
-    for i, dt in enumerate(dates):
-        idx = np.argmin(np.abs(f1.datetime[:].astype('datetime64[s]') - dt))
-        indices.append(idx)
-    pfb1 = PreferredFluxBuffer(fluxes=[f1],
-                              flux_indices=[indices],
-                              value=data_ch['val'],
-                              value_error=data_ch['err'],
-                              datetime=dates.astype(str))
-    d.new(pfb1)
+        # Now read in preferred flux values for calculated height downloaded from FITS
+        if station_info['files']['fits_flux_ch'] is None:
+            msg = "No preferred flux for calculated height in FITS:\n"
+            msg += "-->Station: {}\n".format(station_info['stationID'])
+            msg += "-->Date: {}\n".format(str(date))
+            logging.error(msg)
+        else:
+            data_ch = np.loadtxt(station_info['files']['fits_flux_ch'],
+                                 dtype=np.dtype([('date','S19'),('val',np.float),('err',np.float)]),
+                                 skiprows=1, delimiter=',', ndmin=1)
+            dates = data_ch['date'].astype('datetime64[s]')
+            indices = []
+            values = []
+            val_err = []
+            ndates = []
+            for i, dt in enumerate(dates):
+                min_tdiff = np.min(np.abs(f1.datetime[:].astype('datetime64[s]') - dt))
+                if min_tdiff.astype('int') > 1:
+                    msg = "No assumed height flux estimate can be found for FITS value:\n"
+                    msg += "-->Station: {}\n".format(station_info['stationID'])
+                    msg += "-->Date: {}\n".format(str(dt))
+                    msg += "-->FITS value: {}\n".format(data_ah['val'][i])
+                    logging.error(msg)
+                else:   
+                    idx = np.argmin(np.abs(f1.datetime[:].astype('datetime64[s]') - dt))
+                    indices.append(idx)
+                    values.append(data_ch['val'][i])
+                    val_err.append(data_ch['err'][i])
+                    ndates.append(str(dt))
+            pfb1 = PreferredFluxBuffer(fluxes=[f1],
+                                      flux_indices=indices,
+                                      value=values,
+                                      value_error=val_err,
+                                      datetime=ndates)
+            d.new(pfb1)
 
 
 def flux_ah(pf, perror_thresh=0.5):
@@ -182,7 +257,8 @@ def flux_ah(pf, perror_thresh=0.5):
 
     f = pf.fluxes[0]
     c = f.concentration
-    for fidx in range(f.value[:].size):
+    errors = []
+    for i, fidx in enumerate(pf.flux_indices[:]):
         idx0, idx1 = f.concentration_indices[fidx]
         so2 = c.value[idx0:idx1]
         r = c.rawdata
@@ -204,8 +280,8 @@ def flux_ah(pf, perror_thresh=0.5):
         _, _, elev2 = gf.position[gf_idx+2]
         plumewidth = elev2-elev0
 
-        plmax = so2.max()
-        edge = 0.05*plmax
+        plmax = np.argmax(so2) 
+        edge = 0.05*so2.max()
         pidx = np.where(so2 >= edge)
         plstart = pidx[0][0]
         plend = pidx[0][-1]
@@ -223,14 +299,26 @@ def flux_ah(pf, perror_thresh=0.5):
         kgs_to_tday = 86.4
         flux = ica * ws * 0.000230688
         # Compute percentage error
-        x = pf.value[fidx]*86.4
+        x = pf.value[i]*86.4
         x0 = flux
         p_error = 100.*abs(x0-x)/x
         if p_error > perror_thresh:
-            msg = "Error of {} exceeds threshold for assumed height flux.\n".format(p_error)
-            msg += "Date: {}\n".format(f.datetime[fidx])
-            msg += "Expected flux: {}; Estimated flux: {}.\n".format(x, x0)
-            raise MDOASException(msg)
+            msg = "Error of {:.3f} exceeds threshold for assumed height flux.\n"
+            msg += "Date: {:s}\n"
+            msg += "Expected flux (FITS): {:.3f}; Original flux: {:.3f}; "
+            msg += "Estimated flux: {:.3f}\n"
+            msg += "Plume geometry: start={:.3f}, max={:.3f}, end={:.3f}"
+            msg += ", width={:.3f}\n"
+            msg += "Wind: track={:.3f} sp={:.3f}\n"
+            msg = msg.format(p_error, f.datetime[fidx], x, 
+                             f.value[fidx]*86.4, x0,
+                             np.deg2rad(angles[plstart]),
+                             np.deg2rad(angles[plmax]),
+                             np.deg2rad(angles[plend]),
+                             plumewidth, wd, ws)
+            errors.append(msg)
+    if len(errors) > 0:
+        raise MDOASException(''.join(errors))
  
 
 def flux_ch(pf_ch, pf_ah, perror_thresh=0.5):
@@ -249,9 +337,21 @@ def flux_ch(pf_ch, pf_ah, perror_thresh=0.5):
     c_ah = c_ch
     r_ah = r_ch
 
-    for i, dt in enumerate(f_ch.datetime[:].astype('datetime64[s]')):
+    for i, fidx in enumerate(pf_ch.flux_indices[:]):
+        dt = f_ch.datetime[fidx].astype('datetime64[s]')
+        min_tdiff = np.min(np.abs(f_ah.datetime[:].astype('datetime64[s]') - dt)).astype('int')
+        # Set an arbitrary maximum value of 1 s difference
+        # between the assumed height and calculated height difference
+        # This is supposed to catch cases where we have a calculated height
+        # estimate without an assumed height estimate
+        if min_tdiff > 1.:
+            msg = "No assumed height estimate found for calculated height estimate.\n"
+            msg += "Date: {}\n".format(str(dt))
+            msg += "Time difference to assumed height estimate: {} s\n".format(min_tdiff)
+            raise MDOASException(msg)
+            
         idx = np.argmin(np.abs(f_ah.datetime[:].astype('datetime64[s]') - dt))
-        _, _, h = gf_ch.position[i*3+1]
+        _, _, h = gf_ch.position[fidx*3+1]
         lon, lat, h1 = gf_ah.position[idx*3+1]
         idx0, idx1 = f_ah.concentration_indices[idx]
         idx_max = np.argmax(c_ah.value[idx0:idx1])
@@ -269,6 +369,7 @@ def flux_ch(pf_ch, pf_ah, perror_thresh=0.5):
         if p_error > perror_thresh:
             msg = "Error of {} exceeds threshold for calculated height flux.\n".format(p_error)
             msg += "Date: {}\n".format(str(dt))
+            msg += "Time difference to assumed height estimate: {} s\n".format(min_tdiff)
             msg += "Expected flux: {}; Estimated flux: {}.\n".format(x, x0)
             raise MDOASException(msg)
        
@@ -279,6 +380,8 @@ def verify_flux(filename, perror_thresh=0.5):
     flux values stored in FITS.
     """
     d = Dataset.open(filename)
+    pf_ah = None
+    pf_ch = None
     for instrument in ['WI301', 'WI302']:
         for _pf in d.elements['PreferredFlux']:
             gfm = _pf.fluxes[0].gasflow.methods[0].name[:]
@@ -288,10 +391,13 @@ def verify_flux(filename, perror_thresh=0.5):
             elif gfm == 'WS2PVT' and sid == instrument:
                 pf_ch = _pf
         try:
-            flux_ah(pf_ah, perror_thresh=perror_thresh)
-            flux_ch(pf_ch, pf_ah, perror_thresh=perror_thresh)
+            if pf_ah is not None:
+                flux_ah(pf_ah, perror_thresh=perror_thresh)
+                if pf_ch is not None:
+                    flux_ch(pf_ch, pf_ah, perror_thresh=perror_thresh)
         except MDOASException, e:
             msg = str(e)
+            msg += "StationID: {}\n".format(instrument)
             msg += "File: {}\n".format(filename)
             raise MDOASException(msg) 
     d.close()
@@ -348,136 +454,154 @@ def FITS_download(date, station, outputpath='/tmp'):
         filepaths.append(filepath)
     return filepaths
 
+def main(pg=True):
+    raw_data_path = '/home/yannik/GeoNet/minidoas/'
+    #date = datetime.date(2016, 11, 1)
+    start_date = '2017-01-01'
+    end_date = '2017-12-31'
+    dates = pd.date_range(start=start_date, end=end_date, freq='D')
+    #dates = [datetime.date(2017, 1, 23)]
+    if pg:
+        ndays = len(dates)
+        bar = Bar('Processing', max=ndays)
 
-raw_data_path = '/home/yannik/GeoNet/minidoas/'
-date = datetime.date(2017, 7, 22)
-date = datetime.date(2016, 11, 1)
-dates = [date]
-for date in dates:
-    outputfile = 'MiniDOAS_{:d}{:02d}{:02d}.h5'.format(date.year, date.month, date.day)
-    outputpath = '/tmp'
-    if True:
-        d = Dataset(os.path.join(outputpath, outputfile), 'w')
+    for date in dates:
+        if pg:
+            bar.next()
+        else:
+            print date
+        outputfile = 'MiniDOAS_{:d}{:02d}{:02d}.h5'.format(date.year, date.month, date.day)
+        outputpath = '/tmp'
+        if True:
+            d = Dataset(os.path.join(outputpath, outputfile), 'w')
 
-        # ToDo: get correct plume coordinates
-        tb = TargetBuffer(name='White Island main plume',
-                          target_id='WI001',
-                          position=[177.18375770, -37.52170799, 321.0])
-        t = d.new(tb)
-        
-        wpoptions = "{'Pixel316nm':479, 'TrimLower':30, 'LPFilterCount':3, 'MinWindSpeed':3,"
-        wpoptions += "'BrightEnough':500, 'BlueStep':5, 'MinR2:0.8, 'MaxFitCoeffError':50.0,"
-        wpoptions += "'InPlumeThresh':0.05, 'MinPlumeAngle':0.1, 'MaxPlumeAngle':3.0,"
-        wpoptions += "'MinPlumeSect':0.4, 'MaxPlumeSect':2.0, 'MeanPlumeCtrHeight':310,"
-        wpoptions += "'SEMeanPlumeCtrHeight':0.442, 'MaxRangeToPlume':5000, 'MaxPlumeWidth':2600"
-        wpoptions += "'MaxPlumeCentreAltitude':2000, 'MaxRangeSeperation':5000,"
-        wpoptions += "'MaxAltSeperation':1000, 'MaxTimeDiff':30,"
-        wpoptions += "'MinTriLensAngle':0.1745, 'MaxTriLensAngle':2.9671,"
-        wpoptions += "'SEWindSpeed':0.20, 'WindMultiplier':1.24, 'SEWindDir':0.174}"
-        mb1 = MethodBuffer(name='WidPro v1.2',
-                           description='Jscript wrapper for DOASIS',
-                           settings=wpoptions)
-        m1 = d.new(mb1)
-
-        station_info = {}
-        station_info['WI301'] = {'files':{},
-                                 'stationID': 'WI301',
-                                 'stationLoc':'White Island North-East Point', 
-                                 'target':t,
-                                 'bearing':6.0214,
-                                 'lon':177.192979384, 'lat':-37.5166903535, 'elev': 49.0,
-                                 'widpro_method':m1,
-                                 'wp_station_id':'NE'}
-
-        station_info['WI302'] = {'files':{},
-                                 'stationID': 'WI302',
-                                 'stationLoc':'White Island South Rim', 
-                                 'target':t,
-                                 'bearing':3.8223,
-                                 'lon':177.189013316, 'lat':-37.5265334424, 'elev':96.0,
-                                 'widpro_method':m1,
-                                 'wp_station_id':'SR'}
-
-        for station in ['WI301', 'WI302']:
+            # ToDo: get correct plume coordinates
+            tb = TargetBuffer(name='White Island main plume',
+                              target_id='WI001',
+                              position=[177.18375770, -37.52170799, 321.0])
+            t = d.new(tb)
             
-            # Find the raw data
-            raw_data_filename = "{:s}_{:d}{:02d}{:02d}.zip".format(station_info[station]['wp_station_id'],
-                                                                   date.year, date.month, date.day) 
-            raw_data_filepath = os.path.join(raw_data_path, 'spectra',
-                                             station_info[station]['wp_station_id'],
-                                             raw_data_filename)
-            if os.path.isfile(raw_data_filepath):
-                with ZipFile(raw_data_filepath) as myzip:
-                    myzip.extractall('/tmp')
-                raw_data_filename = raw_data_filename.replace('.zip', '.csv')
-                raw_data_filepath = os.path.join('/tmp', raw_data_filename)
-            if not is_file_OK(raw_data_filepath):
-                raw_data_filepath = None
+            wpoptions = "{'Pixel316nm':479, 'TrimLower':30, 'LPFilterCount':3, 'MinWindSpeed':3,"
+            wpoptions += "'BrightEnough':500, 'BlueStep':5, 'MinR2:0.8, 'MaxFitCoeffError':50.0,"
+            wpoptions += "'InPlumeThresh':0.05, 'MinPlumeAngle':0.1, 'MaxPlumeAngle':3.0,"
+            wpoptions += "'MinPlumeSect':0.4, 'MaxPlumeSect':2.0, 'MeanPlumeCtrHeight':310,"
+            wpoptions += "'SEMeanPlumeCtrHeight':0.442, 'MaxRangeToPlume':5000, 'MaxPlumeWidth':2600"
+            wpoptions += "'MaxPlumeCentreAltitude':2000, 'MaxRangeSeperation':5000,"
+            wpoptions += "'MaxAltSeperation':1000, 'MaxTimeDiff':30,"
+            wpoptions += "'MinTriLensAngle':0.1745, 'MaxTriLensAngle':2.9671,"
+            wpoptions += "'SEWindSpeed':0.20, 'WindMultiplier':1.24, 'SEWindDir':0.174}"
+            mb1 = MethodBuffer(name='WidPro v1.2',
+                               description='Jscript wrapper for DOASIS',
+                               settings=wpoptions)
+            m1 = d.new(mb1)
 
-            station_info[station]['files']['raw'] = raw_data_filepath
-            
-            # Find the concentration data
-            monthdir = '{:d}-{:02d}'.format(date.year, date.month)
-            spectra_filename = "{:s}_{:d}_{:02d}_{:02d}_Spectra.csv"
-            spectra_filename = spectra_filename.format(station_info[station]['wp_station_id'],
-                                                       date.year, date.month, date.day)
-            spectra_filepath = os.path.join(raw_data_path, 'results',
-                                            monthdir,
-                                            spectra_filename)
-            if not is_file_OK(spectra_filepath):
-                spectra_filepath = None
+            station_info = {}
+            station_info['WI301'] = {'files':{},
+                                     'stationID': 'WI301',
+                                     'stationLoc':'White Island North-East Point', 
+                                     'target':t,
+                                     'bearing':6.0214,
+                                     'lon':177.192979384, 'lat':-37.5166903535, 'elev': 49.0,
+                                     'widpro_method':m1,
+                                     'wp_station_id':'NE'}
 
-            station_info[station]['files']['spectra'] = spectra_filepath
-            
-            # Find the flux data
-            flux_ah_filename = spectra_filename.replace('Spectra.csv', 'Scans.csv')
-            flux_ah_filepath = os.path.join(raw_data_path, 'results',
-                                            monthdir,
-                                            flux_ah_filename)
-            if not is_file_OK(flux_ah_filepath):
-                flux_ah_filepath = None
+            station_info['WI302'] = {'files':{},
+                                     'stationID': 'WI302',
+                                     'stationLoc':'White Island South Rim', 
+                                     'target':t,
+                                     'bearing':3.8223,
+                                     'lon':177.189013316, 'lat':-37.5265334424, 'elev':96.0,
+                                     'widpro_method':m1,
+                                     'wp_station_id':'SR'}
+
+            for station in ['WI301', 'WI302']:
                 
-            station_info[station]['files']['flux_ah'] = flux_ah_filepath
-     
-            flux_ch_filename = "XX_{:d}_{:02d}_{:02d}_Combined.csv"
-            flux_ch_filename = flux_ch_filename.format(date.year, date.month, date.day)
-            flux_ch_filepath = os.path.join(raw_data_path, 'results',
-                                            monthdir,
-                                            flux_ch_filename)
-            if not is_file_OK(flux_ch_filepath):
-                flux_ch_filepath = None
+                # Find the raw data
+                raw_data_filename = "{:s}_{:d}{:02d}{:02d}.zip".format(station_info[station]['wp_station_id'],
+                                                                       date.year, date.month, date.day) 
+                raw_data_filepath = os.path.join(raw_data_path, 'spectra',
+                                                 station_info[station]['wp_station_id'],
+                                                 raw_data_filename)
+                if os.path.isfile(raw_data_filepath):
+                    with ZipFile(raw_data_filepath) as myzip:
+                        myzip.extractall('/tmp')
+                    raw_data_filename = raw_data_filename.replace('.zip', '.csv')
+                    raw_data_filepath = os.path.join('/tmp', raw_data_filename)
+                if not is_file_OK(raw_data_filepath):
+                    raw_data_filepath = None
 
-            station_info[station]['files']['flux_ch'] = flux_ch_filepath
+                station_info[station]['files']['raw'] = raw_data_filepath
+                
+                # Find the concentration data
+                monthdir = '{:d}-{:02d}'.format(date.year, date.month)
+                spectra_filename = "{:s}_{:d}_{:02d}_{:02d}_Spectra.csv"
+                spectra_filename = spectra_filename.format(station_info[station]['wp_station_id'],
+                                                           date.year, date.month, date.day)
+                spectra_filepath = os.path.join(raw_data_path, 'results',
+                                                monthdir,
+                                                spectra_filename)
+                if not is_file_OK(spectra_filepath):
+                    spectra_filepath = None
 
-            fits_flux_ah, fits_flux_ch = FITS_download(date, station)
-            station_info[station]['files']['fits_flux_ah'] = fits_flux_ah
-            station_info[station]['files']['fits_flux_ch'] = fits_flux_ch
+                station_info[station]['files']['spectra'] = spectra_filepath
+                
+                # Find the flux data
+                flux_ah_filename = spectra_filename.replace('Spectra.csv', 'Scans.csv')
+                flux_ah_filepath = os.path.join(raw_data_path, 'results',
+                                                monthdir,
+                                                flux_ah_filename)
+                if not is_file_OK(flux_ah_filepath):
+                    flux_ah_filepath = None
+                    
+                station_info[station]['files']['flux_ah'] = flux_ah_filepath
+         
+                flux_ch_filename = "XX_{:d}_{:02d}_{:02d}_Combined.csv"
+                flux_ch_filename = flux_ch_filename.format(date.year, date.month, date.day)
+                flux_ch_filepath = os.path.join(raw_data_path, 'results',
+                                                monthdir,
+                                                flux_ch_filename)
+                if not is_file_OK(flux_ch_filepath):
+                    flux_ch_filepath = None
+
+                station_info[station]['files']['flux_ch'] = flux_ch_filepath
+
+                fits_flux_ah, fits_flux_ch = FITS_download(date, station)
+                station_info[station]['files']['fits_flux_ah'] = fits_flux_ah
+                station_info[station]['files']['fits_flux_ch'] = fits_flux_ch
 
 
-            read_single_station(d, station_info[station], date)
+                read_single_station(d, station_info[station], date)
 
-        # Wind data
-        windd_dir = os.path.join(raw_data_path, 'wind', 'direction')
-        winds_dir = os.path.join(raw_data_path, 'wind', 'speed')
-        sub_dir = '{:02d}-{:02d}'.format(date.year-2000, date.month)
-        winds_filename = '{:d}{:02d}{:02d}_WS_00.txt'.format(date.year,
-                                                             date.month,
-                                                             date.day)
-        windd_filename = winds_filename.replace('WS', 'WD')
-        winds_filepath = os.path.join(winds_dir, sub_dir, winds_filename)
-        windd_filepath = os.path.join(windd_dir, sub_dir, windd_filename)
-        
-        if is_file_OK(winds_filepath) and is_file_OK(windd_filepath):
-            # Read in the raw wind data; this is currently not needed to reproduce
-            # flux estimates so it's just stored for reference
-            e2 = d.read({'direction': windd_filepath,
-                         'speed': winds_filepath},
-                         ftype='minidoas-wind', timeshift=13)
-            gfb = e2['GasFlowBuffer']
-            gf = d.new(gfb)
-                                                                 
+            # Wind data
+            windd_dir = os.path.join(raw_data_path, 'wind', 'direction')
+            winds_dir = os.path.join(raw_data_path, 'wind', 'speed')
+            sub_dir = '{:02d}-{:02d}'.format(date.year-2000, date.month)
+            winds_filename = '{:d}{:02d}{:02d}_WS_00.txt'.format(date.year,
+                                                                 date.month,
+                                                                 date.day)
+            windd_filename = winds_filename.replace('WS', 'WD')
+            winds_filepath = os.path.join(winds_dir, sub_dir, winds_filename)
+            windd_filepath = os.path.join(windd_dir, sub_dir, windd_filename)
+            
+            if is_file_OK(winds_filepath) and is_file_OK(windd_filepath):
+                # Read in the raw wind data; this is currently not needed to reproduce
+                # flux estimates so it's just stored for reference
+                e2 = d.read({'direction': windd_filepath,
+                             'speed': winds_filepath},
+                             ftype='minidoas-wind', timeshift=13)
+                gfb = e2['GasFlowBuffer']
+                gf = d.new(gfb)
+                                                                     
 
-        d.close()
+            d.close()
+        try:
+            verify_flux(os.path.join(outputpath, outputfile), 1.)
+        except MDOASException, e:
+            msg = str(e)
+            logging.error(msg)
+    if pg:
+        bar.finish()
 
-    verify_flux(os.path.join(outputpath, outputfile), 1.)
 
+if __name__ == '__main__':
+    main(pg=False)
