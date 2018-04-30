@@ -587,13 +587,8 @@ def FITS_download(date, station, outputpath='/tmp'):
         filepaths.append(filepath)
     return filepaths
 
-def main(pg=True):
-    raw_data_path = '/home/yannik/GeoNet/minidoas/'
-    #date = datetime.date(2016, 11, 1)
-    start_date = '2017-01-01'
-    end_date = '2017-12-31'
-    dates = pd.date_range(start=start_date, end=end_date, freq='D')
-    #dates = [datetime.date(2017, 1, 4)]
+def main(datapath, start, end, pg=True):
+    dates = pd.date_range(start=start, end=end, freq='D')
     if pg:
         ndays = len(dates)
         bar = Bar('Processing', max=ndays)
@@ -652,7 +647,7 @@ def main(pg=True):
                 # Find the raw data
                 raw_data_filename = "{:s}_{:d}{:02d}{:02d}.zip".format(station_info[station]['wp_station_id'],
                                                                        date.year, date.month, date.day) 
-                raw_data_filepath = os.path.join(raw_data_path, 'spectra',
+                raw_data_filepath = os.path.join(datapath, 'spectra',
                                                  station_info[station]['wp_station_id'],
                                                  raw_data_filename)
                 if os.path.isfile(raw_data_filepath):
@@ -670,7 +665,7 @@ def main(pg=True):
                 spectra_filename = "{:s}_{:d}_{:02d}_{:02d}_Spectra.csv"
                 spectra_filename = spectra_filename.format(station_info[station]['wp_station_id'],
                                                            date.year, date.month, date.day)
-                spectra_filepath = os.path.join(raw_data_path, 'results',
+                spectra_filepath = os.path.join(datapath, 'results',
                                                 monthdir,
                                                 spectra_filename)
                 if not is_file_OK(spectra_filepath):
@@ -680,7 +675,7 @@ def main(pg=True):
                 
                 # Find the flux data
                 flux_ah_filename = spectra_filename.replace('Spectra.csv', 'Scans.csv')
-                flux_ah_filepath = os.path.join(raw_data_path, 'results',
+                flux_ah_filepath = os.path.join(datapath, 'results',
                                                 monthdir,
                                                 flux_ah_filename)
                 if not is_file_OK(flux_ah_filepath):
@@ -690,7 +685,7 @@ def main(pg=True):
          
                 flux_ch_filename = "XX_{:d}_{:02d}_{:02d}_Combined.csv"
                 flux_ch_filename = flux_ch_filename.format(date.year, date.month, date.day)
-                flux_ch_filepath = os.path.join(raw_data_path, 'results',
+                flux_ch_filepath = os.path.join(datapath, 'results',
                                                 monthdir,
                                                 flux_ch_filename)
                 if not is_file_OK(flux_ch_filepath):
@@ -709,8 +704,8 @@ def main(pg=True):
 
 
             # Wind data
-            windd_dir = os.path.join(raw_data_path, 'wind', 'direction')
-            winds_dir = os.path.join(raw_data_path, 'wind', 'speed')
+            windd_dir = os.path.join(datapath, 'wind', 'direction')
+            winds_dir = os.path.join(datapath, 'wind', 'speed')
             sub_dir = '{:02d}-{:02d}'.format(date.year-2000, date.month)
             winds_filename = '{:d}{:02d}{:02d}_WS_00.txt'.format(date.year,
                                                                  date.month,
@@ -739,4 +734,16 @@ def main(pg=True):
 
 
 if __name__ == '__main__':
-    main(pg=False)
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('datapath',
+                        help='Absolute path to minidoas root directory.')
+    parser.add_argument('start',
+                        help='Start date as yyy-mm-dd.')
+    parser.add_argument('end',
+                        help='End date as yyy-mm-dd.')
+    parser.add_argument('--pg', help='Enable thre progress bar',
+                        action='store_true')
+    args = parser.parse_args()
+    main(args.datapath, args.start, args.end, pg=args.pg)
+
