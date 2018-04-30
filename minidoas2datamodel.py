@@ -1,6 +1,9 @@
+from collections import namedtuple
 import datetime
 import logging
+import math
 import os
+import warnings
 from zipfile import ZipFile
 
 import numpy as np
@@ -8,6 +11,8 @@ import pandas as pd
 import pyproj
 from pytz import timezone, utc
 from progress.bar import Bar
+import scipy.optimize
+from scipy.ndimage.filters import convolve1d
 
 from spectroscopy.dataset import Dataset
 from spectroscopy.plugins.minidoas import MiniDoasException
@@ -24,6 +29,95 @@ logging.basicConfig(filename='minidoas2datamodel.log', filemode='w',
                     format='%(levelname)s %(asctime)s: %(message)s',
                     datefmt='%Y/%m/%d %H:%M:%S')
 
+
+
+GaussianParameters = namedtuple('GaussianParameters',['amplitude','mean',
+                                                      'sigma'])
+
+def gaussian_pts(xpts, p):
+    """
+    Returns the values of a Gaussian (described by the GaussianParameters p)
+    corresponding to the x values passed in as xpts (an array).
+    """
+    xpts = np.array(xpts)
+    f = gaussian_func(p)
+    
+    return f(xpts)
+
+
+def gaussian_func(p):
+    return lambda x: p[0]*scipy.exp(-(x-p[1])**2/(2.0*p[2]**2))
+
+
+class FittingError(RuntimeError):
+    pass
+
+
+def __errfunc(p,x,y):
+    #define an error function such that there is a high cost to having a 
+    #negative amplitude
+    diff = (p[0]*scipy.exp(-(x-p[1])**2/(2.0*p[2]**2))) - y
+    if p[0] < 0.0:
+        diff *= 10000.0
+
+    return diff
+
+
+#function taken from avoscan.processing module
+def fit_gaussian(xdata, ydata, amplitude_guess=None, mean_guess=None, 
+                 sigma_guess=None):
+    """
+    Fits a gaussian to some data using a least squares fit method. Returns a named tuple
+    of best fit parameters (amplitude, mean, sigma).
+    
+    Initial guess values for the fit parameters can be specified as kwargs. Otherwise they
+    are estimated from the data.
+    
+    """
+    
+    if len(xdata) != len(ydata):
+        raise ValueError, "Lengths of xdata and ydata must match"
+    
+    if len(xdata) < 4:
+        raise ValueError, "xdata and ydata need to contain at least 4 elements each"
+    
+    # guess some fit parameters - unless they were specified as kwargs
+    if amplitude_guess is None:
+        amplitude_guess = max(ydata)
+    
+    if mean_guess is None:
+        weights = ydata - np.average(ydata)
+        weights[np.where(weights <0)]=0 
+        mean_guess = np.average(xdata,weights=weights)
+                   
+    #find width at half height as estimate of sigma        
+    if sigma_guess is None:      
+        variance = np.dot(np.abs(ydata), (xdata-mean_guess)**2)/np.abs(ydata).sum()  # Fast and numerically precise    
+        sigma_guess = math.sqrt(variance)
+    
+    
+    #put guess params into an array ready for fitting
+    p0 = np.array([amplitude_guess, mean_guess, sigma_guess])
+
+    # do the fitting
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        p1, success = scipy.optimize.leastsq(__errfunc, p0, args=(xdata,ydata))
+        
+    if success not in (1,2,3,4):
+        raise FittingError("Could not fit Gaussian to data.")
+    
+    return GaussianParameters(*p1)
+
+
+def binomial_filter(y, mask, order):
+    y_old = y.copy()
+    mask = np.array(mask)
+    factor = mask.sum()
+    for i in range(order):
+        y_new = convolve1d(y_old, mask, mode='reflect')/factor 
+        y_old = y_new
+    return y_new
 
 class MDOASException(Exception): pass
 
@@ -78,9 +172,12 @@ def read_single_station(d, station_info, date):
         logging.info(msg)
         return
 
+    # First read in the smoothed version of the concentration
+    # which the subsequent computation of flux values is
+    # based on
     e1 = d.read(station_info['files']['spectra'],
                 date=datestr, ftype='minidoas-spectra',
-                timeshift=timeshift)
+                timeshift=timeshift, model=True)
     cb = e1['ConcentrationBuffer']
     idxs = np.zeros(cb.value.shape)
     for i in range(cb.value.shape[0]):
@@ -89,7 +186,24 @@ def read_single_station(d, station_info, date):
     cb.rawdata = [rr]
     cb.rawdata_indices = idxs
     cb.method = station_info['widpro_method'] 
+    cb.user_notes = 'smoothed path concentration'
     cc = d.new(cb)
+
+    # Now read in the original path concentration
+    # to keep as a reference
+    e2 = d.read(station_info['files']['spectra'],
+                date=datestr, ftype='minidoas-spectra',
+                timeshift=timeshift)
+    cb2 = e2['ConcentrationBuffer']
+    idxs = np.zeros(cb2.value.shape)
+    for i in range(cb.value.shape[0]):
+        idx = np.argmin(np.abs(rr.datetime[:].astype('datetime64[ms]') - cb2.datetime[i].astype('datetime64[ms]')))
+        idxs[i] = idx
+    cb2.rawdata = [rr]
+    cb2.rawdata_indices = idxs
+    cb2.method = station_info['widpro_method'] 
+    cb2.user_notes = 'original path concentration'
+    cc2 = d.new(cb2)
 
    
     # Read in the flux estimates for assumed height
@@ -162,7 +276,7 @@ def read_single_station(d, station_info, date):
                     val_err.append(data_ah['err'][i])
                     ndates.append(str(dt))
             pfb = PreferredFluxBuffer(fluxes=[f],
-                                      flux_indices=indices,
+                                      flux_indices=[indices],
                                       value=values,
                                       value_error=val_err,
                                       datetime=ndates)
@@ -243,14 +357,14 @@ def read_single_station(d, station_info, date):
                     val_err.append(data_ch['err'][i])
                     ndates.append(str(dt))
             pfb1 = PreferredFluxBuffer(fluxes=[f1],
-                                      flux_indices=indices,
+                                      flux_indices=[indices],
                                       value=values,
                                       value_error=val_err,
                                       datetime=ndates)
             d.new(pfb1)
 
 
-def flux_ah(pf, perror_thresh=0.5):
+def flux_ah(pf, perror_thresh=0.5, smoothing=False):
     """
     Compute the flux for assumed height.
     """
@@ -258,13 +372,20 @@ def flux_ah(pf, perror_thresh=0.5):
     f = pf.fluxes[0]
     c = f.concentration
     errors = []
-    for i, fidx in enumerate(pf.flux_indices[:]):
+    for i, fidx in enumerate(pf.flux_indices[0][:]):
         idx0, idx1 = f.concentration_indices[fidx]
-        so2 = c.value[idx0:idx1]
+        so2_raw = c.value[idx0:idx1]
         r = c.rawdata
         ridx = c.rawdata_indices[idx0:idx1]
         angles = r[0].inc_angle[ridx]
         bearing = r[0].bearing[0]
+
+        if smoothing:
+            so2_smooth = binomial_filter(so2_raw, [1, 2, 1], 5)
+            p = fit_gaussian(angles, so2_smooth)
+            so2 = gaussian_pts(angles, p)
+        else:
+            so2 = so2_raw
 
         # Get the wind direction
         gf = f.gasflow
@@ -321,7 +442,7 @@ def flux_ah(pf, perror_thresh=0.5):
         raise MDOASException(''.join(errors))
  
 
-def flux_ch(pf_ch, pf_ah, perror_thresh=0.5):
+def flux_ch(pf_ch, pf_ah, perror_thresh=0.5, smoothing=False):
     """
     Compute the flux for calculated (i.e. triangulated) height.
     """
@@ -337,7 +458,7 @@ def flux_ch(pf_ch, pf_ah, perror_thresh=0.5):
     c_ah = c_ch
     r_ah = r_ch
 
-    for i, fidx in enumerate(pf_ch.flux_indices[:]):
+    for i, fidx in enumerate(pf_ch.flux_indices[0][:]):
         dt = f_ch.datetime[fidx].astype('datetime64[s]')
         min_tdiff = np.min(np.abs(f_ah.datetime[:].astype('datetime64[s]') - dt)).astype('int')
         # Set an arbitrary maximum value of 1 s difference
@@ -354,7 +475,19 @@ def flux_ch(pf_ch, pf_ah, perror_thresh=0.5):
         _, _, h = gf_ch.position[fidx*3+1]
         lon, lat, h1 = gf_ah.position[idx*3+1]
         idx0, idx1 = f_ah.concentration_indices[idx]
-        idx_max = np.argmax(c_ah.value[idx0:idx1])
+        
+        so2_raw = c_ah.value[idx0:idx1]
+        ridx = c_ah.rawdata_indices[idx0:idx1]
+        angles = r_ah.inc_angle[ridx]
+
+        if smoothing:
+            so2_smooth = binomial_filter(so2_raw, [1, 2, 1], 5)
+            p = fit_gaussian(angles, so2_smooth)
+            so2 = gaussian_pts(angles, p)
+        else:
+            so2 = so2_raw
+
+        idx_max = np.argmax(so2)
         ridx_max = c_ah.rawdata_indices[idx0+idx_max]
         angle_max = r_ah.inc_angle[ridx_max]
         lon1, lat1, h2 = r_ah.position[ridx_max]
@@ -460,7 +593,7 @@ def main(pg=True):
     start_date = '2017-01-01'
     end_date = '2017-12-31'
     dates = pd.date_range(start=start_date, end=end_date, freq='D')
-    #dates = [datetime.date(2017, 1, 23)]
+    #dates = [datetime.date(2017, 1, 4)]
     if pg:
         ndays = len(dates)
         bar = Bar('Processing', max=ndays)
@@ -569,8 +702,11 @@ def main(pg=True):
                 station_info[station]['files']['fits_flux_ah'] = fits_flux_ah
                 station_info[station]['files']['fits_flux_ch'] = fits_flux_ch
 
+                try:
+                    read_single_station(d, station_info[station], date)
+                except MiniDoasException, e:
+                    logging.error(str(e))
 
-                read_single_station(d, station_info[station], date)
 
             # Wind data
             windd_dir = os.path.join(raw_data_path, 'wind', 'direction')
@@ -586,12 +722,11 @@ def main(pg=True):
             if is_file_OK(winds_filepath) and is_file_OK(windd_filepath):
                 # Read in the raw wind data; this is currently not needed to reproduce
                 # flux estimates so it's just stored for reference
-                e2 = d.read({'direction': windd_filepath,
+                e = d.read({'direction': windd_filepath,
                              'speed': winds_filepath},
                              ftype='minidoas-wind', timeshift=13)
-                gfb = e2['GasFlowBuffer']
+                gfb = e['GasFlowBuffer']
                 gf = d.new(gfb)
-                                                                     
 
             d.close()
         try:
