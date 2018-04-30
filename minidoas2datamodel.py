@@ -119,6 +119,7 @@ def binomial_filter(y, mask, order):
         y_old = y_new
     return y_new
 
+
 class MDOASException(Exception): pass
 
 
@@ -134,7 +135,7 @@ def read_single_station(d, station_info, date):
     # Read the raw data
     if station_info['files']['raw'] is None:
         # There is no point continuing if we don't have any raw data
-        msg = "No raw data for:\n"
+        msg = "INFO 01: No raw data for:\n"
         msg += "-->Station: {}\n".format(station_info['stationID'])
         msg += "-->Date: {}\n".format(str(date))
         logging.info(msg)
@@ -166,7 +167,7 @@ def read_single_station(d, station_info, date):
 
     # Read the concentration
     if station_info['files']['spectra'] is None:
-        msg = "No concentration (i.e. spectra) data for:\n"
+        msg = "INFO 02: No concentration (i.e. spectra) data for:\n"
         msg += "-->Station: {}\n".format(station_info['stationID'])
         msg += "-->Date: {}\n".format(str(date))
         logging.info(msg)
@@ -208,7 +209,7 @@ def read_single_station(d, station_info, date):
    
     # Read in the flux estimates for assumed height
     if station_info['files']['flux_ah'] is None:
-        msg = "No assumed height flux data for:\n"
+        msg = "INFO 03: No assumed height flux data for:\n"
         msg += "-->Station: {}\n".format(station_info['stationID'])
         msg += "-->Date: {}\n".format(str(date))
         logging.info(msg)
@@ -248,7 +249,7 @@ def read_single_station(d, station_info, date):
         f = d.new(fb)
         # Now read in preferred flux values for assumed height downloaded from FITS
         if station_info['files']['fits_flux_ah'] is None:
-            msg = "No preferred flux for assumed height in FITS:\n"
+            msg = "ERROR 01: No preferred flux for assumed height in FITS:\n"
             msg += "-->Station: {}\n".format(station_info['stationID'])
             msg += "-->Date: {}\n".format(str(date))
             logging.error(msg)
@@ -264,7 +265,7 @@ def read_single_station(d, station_info, date):
             for i, dt in enumerate(dates):
                 min_tdiff = np.min(np.abs(f.datetime[:].astype('datetime64[s]') - dt))
                 if min_tdiff.astype('int') > 1:
-                    msg = "No assumed height flux estimate can be found for FITS value:\n"
+                    msg = "ERROR 02: No assumed height flux estimate can be found for FITS value:\n"
                     msg += "-->Station: {}\n".format(station_info['stationID'])
                     msg += "-->Date: {}\n".format(str(dt))
                     msg += "-->FITS value: {}\n".format(data_ah['val'][i])
@@ -285,7 +286,7 @@ def read_single_station(d, station_info, date):
 
     # Read in the flux estimates for calculated height
     if station_info['files']['flux_ch'] is None:
-        msg = "No calculated height flux data for:\n"
+        msg = "INFO 04: No calculated height flux data for:\n"
         msg += "-->Station: {}\n".format(station_info['stationID'])
         msg += "-->Date: {}\n".format(str(date))
         logging.info(msg)
@@ -329,7 +330,7 @@ def read_single_station(d, station_info, date):
 
         # Now read in preferred flux values for calculated height downloaded from FITS
         if station_info['files']['fits_flux_ch'] is None:
-            msg = "No preferred flux for calculated height in FITS:\n"
+            msg = "ERROR 01: No preferred flux for calculated height in FITS:\n"
             msg += "-->Station: {}\n".format(station_info['stationID'])
             msg += "-->Date: {}\n".format(str(date))
             logging.error(msg)
@@ -345,7 +346,7 @@ def read_single_station(d, station_info, date):
             for i, dt in enumerate(dates):
                 min_tdiff = np.min(np.abs(f1.datetime[:].astype('datetime64[s]') - dt))
                 if min_tdiff.astype('int') > 1:
-                    msg = "No assumed height flux estimate can be found for FITS value:\n"
+                    msg = "ERROR 02: No calculated height flux estimate can be found for FITS value:\n"
                     msg += "-->Station: {}\n".format(station_info['stationID'])
                     msg += "-->Date: {}\n".format(str(dt))
                     msg += "-->FITS value: {}\n".format(data_ah['val'][i])
@@ -424,7 +425,7 @@ def flux_ah(pf, perror_thresh=0.5, smoothing=False):
         x0 = flux
         p_error = 100.*abs(x0-x)/x
         if p_error > perror_thresh:
-            msg = "Error of {:.3f} exceeds threshold for assumed height flux.\n"
+            msg = "ERROR 03: Error of {:.3f} exceeds threshold for assumed height flux.\n"
             msg += "Date: {:s}\n"
             msg += "Expected flux (FITS): {:.3f}; Original flux: {:.3f}; "
             msg += "Estimated flux: {:.3f}\n"
@@ -466,7 +467,7 @@ def flux_ch(pf_ch, pf_ah, perror_thresh=0.5, smoothing=False):
         # This is supposed to catch cases where we have a calculated height
         # estimate without an assumed height estimate
         if min_tdiff > 1.:
-            msg = "No assumed height estimate found for calculated height estimate.\n"
+            msg = "ERROR 04: No assumed height estimate found for calculated height estimate.\n"
             msg += "Date: {}\n".format(str(dt))
             msg += "Time difference to assumed height estimate: {} s\n".format(min_tdiff)
             raise MDOASException(msg)
@@ -500,7 +501,7 @@ def flux_ch(pf_ch, pf_ah, perror_thresh=0.5, smoothing=False):
         x0 = f_ah.value[idx]*rangescale*rangescale*86.4
         p_error = 100.*abs(x0-x)/x
         if p_error > perror_thresh:
-            msg = "Error of {} exceeds threshold for calculated height flux.\n".format(p_error)
+            msg = "ERROR 03: Error of {} exceeds threshold for calculated height flux.\n".format(p_error)
             msg += "Date: {}\n".format(str(dt))
             msg += "Time difference to assumed height estimate: {} s\n".format(min_tdiff)
             msg += "Expected flux: {}; Estimated flux: {}.\n".format(x, x0)
