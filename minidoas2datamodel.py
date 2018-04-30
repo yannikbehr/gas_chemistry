@@ -587,7 +587,7 @@ def FITS_download(date, station, outputpath='/tmp'):
         filepaths.append(filepath)
     return filepaths
 
-def main(datapath, start, end, pg=True):
+def main(datapath, start, end, pg=True, deletefiles=False):
     dates = pd.date_range(start=start, end=end, freq='D')
     if pg:
         ndays = len(dates)
@@ -600,8 +600,9 @@ def main(datapath, start, end, pg=True):
             print date
         outputfile = 'MiniDOAS_{:d}{:02d}{:02d}.h5'.format(date.year, date.month, date.day)
         outputpath = '/tmp'
+        h5file = os.path.join(outputpath, outputfile)
         if True:
-            d = Dataset(os.path.join(outputpath, outputfile), 'w')
+            d = Dataset(h5file, 'w')
 
             # ToDo: get correct plume coordinates
             tb = TargetBuffer(name='White Island main plume',
@@ -729,6 +730,17 @@ def main(datapath, start, end, pg=True):
         except MDOASException, e:
             msg = str(e)
             logging.error(msg)
+        if deletefiles:
+            if h5file is not None and os.path.isfile(h5file):
+                os.remove(h5file)
+            for station in ['WI301', 'WI302']:
+                files = [station_info[station]['files']['raw'],
+                         station_info[station]['files']['fits_flux_ah'],
+                         station_info[station]['files']['fits_flux_ch']
+                        ]
+                for _f in files:
+                    if _f is not None and os.path.isfile(_f):
+                        os.remove(_f)
     if pg:
         bar.finish()
 
@@ -737,13 +749,16 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('datapath',
-                        help='Absolute path to minidoas root directory.')
+                        help='absolute path to minidoas root directory')
     parser.add_argument('start',
-                        help='Start date as yyy-mm-dd.')
+                        help='start date as yyy-mm-dd')
     parser.add_argument('end',
-                        help='End date as yyy-mm-dd.')
-    parser.add_argument('--pg', help='Enable thre progress bar',
+                        help='end date as yyy-mm-dd')
+    parser.add_argument('--pg', help='enable progress bar',
+                        action='store_true')
+    parser.add_argument('-d', '--delete', help='delete files after conversion',
                         action='store_true')
     args = parser.parse_args()
-    main(args.datapath, args.start, args.end, pg=args.pg)
+    main(args.datapath, args.start, args.end, pg=args.pg,
+         deletefiles=args.delete)
 
