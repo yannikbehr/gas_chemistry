@@ -620,7 +620,7 @@ def FITS_download(date, station, outputpath='/tmp'):
     return filepaths
 
 
-def main(datapath, start, end, pg=True, deletefiles=False):
+def main(datapath, outputpath, start, end, pg=True, deletefiles=False):
     dates = pd.date_range(start=start, end=end, freq='D')
     if pg:
         ndays = len(dates)
@@ -634,7 +634,6 @@ def main(datapath, start, end, pg=True, deletefiles=False):
         outputfile = 'MiniDOAS_{:d}{:02d}{:02d}.h5'.format(date.year,
                                                            date.month,
                                                            date.day)
-        outputpath = '/tmp'
         h5file = os.path.join(outputpath, outputfile)
         if True:
             d = Dataset(h5file, 'w')
@@ -808,6 +807,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('datapath',
                         help='absolute path to minidoas root directory')
+    parser.add_argument('outputpath',
+                        help='parent directory for output')
     parser.add_argument('start',
                         help='start date as yyy-mm-dd')
     parser.add_argument('end',
@@ -817,6 +818,5 @@ if __name__ == '__main__':
     parser.add_argument('-d', '--delete', help='delete files after conversion',
                         action='store_true')
     args = parser.parse_args()
-    main(args.datapath, args.start, args.end, pg=args.pg,
+    main(args.datapath, args.outputpath, args.start, args.end, pg=args.pg,
          deletefiles=args.delete)
-
