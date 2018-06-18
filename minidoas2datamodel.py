@@ -1,5 +1,6 @@
 from collections import namedtuple
 import datetime
+import io
 import logging
 import math
 import os
@@ -570,11 +571,12 @@ def is_file_OK(filename):
     if filename is None:
         return False
     if os.path.isfile(filename):
-        with open(filename) as fh:
+        with io.open(filename, encoding='utf-8-sig') as fh:
             linecount = len(fh.readlines())
         if linecount < 2:
             return False
     else:
+        logging.error("File {} does not exist".format(filename))
         return False
     return True
 
@@ -621,6 +623,11 @@ def FITS_download(date, station, outputpath='/tmp'):
 
 
 def main(datapath, outputpath, start, end, pg=True, deletefiles=False):
+    msg = "Data path is: {}\n".format(datapath)
+    msg += "Output path is: {}\n".format(outputpath)
+    msg += "Start date: {}\n".format(start)
+    msg += "End date: {}\n".format(end)
+    logging.info(msg)
     dates = pd.date_range(start=start, end=end, freq='D')
     if pg:
         ndays = len(dates)
@@ -691,8 +698,10 @@ def main(datapath, outputpath, start, end, pg=True, deletefiles=False):
                 # Find the raw data
                 raw_data_filename = "{:s}_{:d}{:02d}{:02d}.zip"
                 station_id = station_info[station]['wp_station_id']
-                raw_data_filename.format(station_id,
-                                         date.year, date.month, date.day)
+                raw_data_filename = raw_data_filename.format(station_id,
+                                                             date.year,
+                                                             date.month,
+                                                             date.day)
                 raw_data_filepath = os.path.join(datapath, 'spectra',
                                                  station_id,
                                                  raw_data_filename)
@@ -709,9 +718,16 @@ def main(datapath, outputpath, start, end, pg=True, deletefiles=False):
                                                                       '.csv')
                         raw_data_filepath = os.path.join('/tmp',
                                                          raw_data_filename)
-                if not is_file_OK(raw_data_filepath):
-                    raw_data_filepath = None
-
+                else:
+                    logging.error("file {} does not exist"
+                                  .format(raw_data_filepath))
+                    continue
+                try:
+                    if not is_file_OK(raw_data_filepath):
+                        raw_data_filepath = None
+                except Exception as e:
+                    print(raw_data_filepath)
+                    raise(e)
                 station_info[station]['files']['raw'] = raw_data_filepath
 
                 # Find the concentration data
