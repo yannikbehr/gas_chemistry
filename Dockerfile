@@ -28,5 +28,6 @@ RUN pip install -I -U pip && \
     pip install git+https://github.com/verigak/progress.git
 
 COPY *.py /usr/local/bin/
-
-
+RUN mkdir -p /home/jovyan/results \
+    && chmod a+rwx /home/jovyan/results
+CMD ["/bin/bash"]
