@@ -776,6 +776,10 @@ def main(datapath, outputpath, start, end, pg=True, deletefiles=False):
                     read_single_station(d, station_info[station], date)
                 except MiniDoasException as e:
                     logging.error(str(e))
+                fn = raw_data_filename.replace('.zip', '.csv')
+                fn = os.path.join('/tmp', fn) 
+                if fn is not None and os.path.isfile(fn):
+                        os.remove(fn)
 
             # Wind data
             windd_dir = os.path.join(datapath, 'wind', 'direction')
@@ -804,6 +808,7 @@ def main(datapath, outputpath, start, end, pg=True, deletefiles=False):
         except MDOASException as e:
             msg = str(e)
             logging.error(msg)
+
         if deletefiles:
             if h5file is not None and os.path.isfile(h5file):
                 os.remove(h5file)
